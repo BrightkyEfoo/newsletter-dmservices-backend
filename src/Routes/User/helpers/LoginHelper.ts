@@ -1,60 +1,103 @@
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { myRequest } from '../../../types/jwt';
 import { User } from '../../../database/Sequelize';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { private_key } from '../../../auth/private_key';
+import { rateLimit } from 'express-rate-limit';
+import Redis from 'ioredis';
 
-export const loginUser = (
-  req: myRequest<{}, { email?: string; password?: string }>,
-  res: Response
-) => {
+const redis = new Redis();
+
+const maxNumberOfFailedLogins = 3;
+const timeWindowForFailedLogins = 60 * 60 * 1;
+
+export const loginUser = async (req: Request, res: Response) => {
   const { email, password } = req.body;
-  if (email === undefined || password === undefined) {
-    return res
-      .status(400)
-      .json({ msg: 'les champs email et mot de passe sont requis.' });
+  const user = email;
+  // check user is not attempted too many login requests
+  let t = await redis.get(user);
+  let a = 0;
+  if (t == null) {
+    a = 0;
+  } else {
+    a = parseInt(t);
   }
-  User.findOne({ where: { email } })
-    .then(user => {
-      if (user) {
-        bcrypt.compare(password, user.password, (err, result) => {
-          if (err) {
-            return res.status(400).json({ msg: 'quelque chose a mal tourne' });
-          }
-          if (result) {
-            const token = jwt.sign(
-              {
-                userId: user.id,
-                name: user.name,
-              },
-              private_key,
-              {
-                expiresIn: '24h',
-              }
-            );
-            const userTemp = { ...user.toJSON(), password: '' };
-            user.save().then(() => {
-              res.json({
-                msg: 'connexion reussie',
-                user: userTemp,
-                token,
-              });
-            });
-          } else {
-            return res.status(401).json({ msg: 'mot de passe errone' });
-          }
-        });
-      } else {
-        return res.status(404).json({
-          msg: `Il semble qu'il n y ait aucun utilisateur associe a cet email`,
-        });
-      }
-    })
-    .catch(err => {
-      res.status(400).json({
-        msg: `quelque chose a mal tourne. veuillez reessayer dans quelques instants`,
-        err,
+  let userAttempts = a;
+  if (userAttempts > maxNumberOfFailedLogins) {
+    return res.status(429).send('Too Many Attempts try it one hour later');
+  }
+
+  // Let's check user
+  const loginResult = await authorise(user, password);
+
+  // user attempt failed
+  if (!loginResult.isLoggedIn) {
+    await redis.set(user, ++userAttempts, 'EX', timeWindowForFailedLogins);
+    res.status(400).send('failed');
+  } else {
+    // successful login
+    await redis.del(user);
+    if (loginResult.user) {
+      loginResult.user.password = '';
+      res.json({
+        msg: 'success',
+        user: loginResult.user,
+        token: 'Bearer ' + loginResult.token,
       });
-    });
+    } else {
+      res.status(500).json({ msg: 'error' });
+    }
+  }
+};
+const authorise = async (email: string, password: string) => {
+  const u: {
+    isLoggedIn: boolean;
+    exists: boolean;
+    token: string;
+    user:
+      | undefined
+      | {
+          password: string;
+          id: number;
+          name: string;
+          email: string;
+          whatsapp: string;
+          phone: string;
+          website?: string | undefined;
+          facebook?: string | undefined;
+        };
+  } = {
+    token: '',
+    isLoggedIn: false,
+    exists: false,
+    user: undefined,
+  };
+  await User.findOne({ where: { email } }).then(user => {
+    if (user) {
+      u.exists = true;
+      bcrypt.compare(password, user.password, (err, result) => {
+        if (err) {
+          console.log('err', err);
+        }
+        if (result) {
+          const token = jwt.sign(
+            {
+              userId: user.id,
+              name: user.name,
+            },
+            private_key,
+            {
+              expiresIn: '24h',
+            }
+          );
+          const userTemp = { ...user.toJSON(), password: '' };
+          u.token = token;
+          u.user = userTemp;
+          u.isLoggedIn = true;
+        }
+      });
+    }
+  });
+  return u;
 };

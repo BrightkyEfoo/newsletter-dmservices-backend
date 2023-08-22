@@ -3,7 +3,7 @@ import UserModel from './models/UserModel';
 import { userFiller } from './fillers/UserFIller';
 import HistoryModel from './models/HistoryModel';
 
-const sequelize = new Sequelize('papsdb', 'root', '1', {
+const sequelize = new Sequelize('newsletters', 'root', '1', {
   host: 'localhost',
   dialect: 'mysql',
   logging: false,
